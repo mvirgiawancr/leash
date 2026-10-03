@@ -14,10 +14,10 @@ const body = z.object({
 
 export async function POST(req: Request) {
   const uid = await userId();
-  if (!getWallet(uid)) return NextResponse.json({ error: "Connect a PayPal wallet first." }, { status: 400 });
+  if (!(await getWallet(uid))) return NextResponse.json({ error: "Connect a PayPal wallet first." }, { status: 400 });
   const parsed = body.safeParse(await req.json());
   if (!parsed.success) return NextResponse.json({ error: "Check the mandate fields." }, { status: 400 });
   const m = parsed.data;
-  signMandate(uid, { ...m, askAbove: Math.min(m.askAbove, m.monthlyBudget) });
+  await signMandate(uid, { ...m, askAbove: Math.min(m.askAbove, m.monthlyBudget) });
   return NextResponse.json({ ok: true });
 }

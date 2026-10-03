@@ -35,8 +35,7 @@ const RULES = [
 
 export default async function Home({ searchParams }: PageProps<"/">) {
   const uid = await userId();
-  const wallet = getWallet(uid);
-  const mandate = getMandate(uid);
+  const [wallet, mandate] = await Promise.all([getWallet(uid), getMandate(uid)]);
   const notice = NOTICE[String((await searchParams).wallet ?? "")];
 
   return (

@@ -1,95 +1,86 @@
 import "server-only";
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { neon } from "@neondatabase/serverless";
 import { randomUUID } from "node:crypto";
 import type { Errand, ErrandStatus, FoundCard, Mandate, Option, ShipTo, TapeLine, Wallet } from "./types";
 
-const dir = process.env.LEASH_DATA_DIR || join(process.cwd(), "data");
-mkdirSync(dir, { recursive: true });
+// Neon serverless Postgres over HTTP: no connection pool to manage on Vercel functions.
+function url() {
+  const u = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  if (!u) throw new Error("Missing env DATABASE_URL (Neon Postgres connection string)");
+  return u;
+}
+const g = globalThis as unknown as { __leashSql?: ReturnType<typeof neon>; __leashSchema?: Promise<unknown> };
+const sql = () => (g.__leashSql ??= neon(url()));
 
-const g = globalThis as unknown as { __leashDb?: DatabaseSync };
-const db = (g.__leashDb ??= open());
-
-function open() {
-  const d = new DatabaseSync(join(dir, "leash.db"));
-  d.exec(`
-    PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS wallets (
+// Timestamps are ISO strings (TEXT) so they compare and serialize the same everywhere.
+function schema() {
+  const q = sql();
+  return (g.__leashSchema ??= q.transaction([
+    q.query(`CREATE TABLE IF NOT EXISTS wallets (
       user_id TEXT PRIMARY KEY, vault_id TEXT, customer_id TEXT, payer_email TEXT,
-      setup_token TEXT, created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS mandates (
-      id TEXT PRIMARY KEY, user_id TEXT NOT NULL, purpose TEXT NOT NULL, covers TEXT NOT NULL,
-      excludes TEXT NOT NULL, monthly_budget REAL NOT NULL, ask_above REAL NOT NULL,
-      expires TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS errands (
+      setup_token TEXT, ship_to JSONB, created_at TEXT NOT NULL)`),
+    q.query(`CREATE TABLE IF NOT EXISTS mandates (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL, purpose TEXT NOT NULL, covers JSONB NOT NULL,
+      excludes JSONB NOT NULL, monthly_budget DOUBLE PRECISION NOT NULL, ask_above DOUBLE PRECISION NOT NULL,
+      expires TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)`),
+    q.query(`CREATE TABLE IF NOT EXISTS errands (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL, mandate_id TEXT NOT NULL, ask TEXT NOT NULL,
-      status TEXT NOT NULL, reply TEXT NOT NULL DEFAULT '[]', options TEXT NOT NULL DEFAULT '[]',
-      approval TEXT, receipt TEXT, model TEXT, created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS tape (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, errand_id TEXT NOT NULL, at TEXT NOT NULL,
-      kind TEXT NOT NULL, detail TEXT NOT NULL, amount REAL, ref TEXT
-    );
-    CREATE TABLE IF NOT EXISTS purchases (
+      status TEXT NOT NULL, reply JSONB NOT NULL DEFAULT '[]', options JSONB NOT NULL DEFAULT '[]',
+      found JSONB NOT NULL DEFAULT '[]', approval JSONB, receipt JSONB, model TEXT, created_at TEXT NOT NULL)`),
+    q.query(`CREATE TABLE IF NOT EXISTS tape (
+      id BIGSERIAL PRIMARY KEY, errand_id TEXT NOT NULL, at TEXT NOT NULL,
+      kind TEXT NOT NULL, detail TEXT NOT NULL, amount DOUBLE PRECISION, ref TEXT)`),
+    q.query(`CREATE TABLE IF NOT EXISTS purchases (
       id TEXT PRIMARY KEY, errand_id TEXT NOT NULL, mandate_id TEXT NOT NULL, user_id TEXT NOT NULL,
-      product_id TEXT NOT NULL, title TEXT NOT NULL, retailer TEXT NOT NULL, amount REAL NOT NULL,
+      product_id TEXT NOT NULL, title TEXT NOT NULL, retailer TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL,
       order_id TEXT NOT NULL, capture_id TEXT NOT NULL, payout_batch TEXT, refund_id TEXT,
-      status TEXT NOT NULL, created_at TEXT NOT NULL
-    );
-  `);
-  // columns added after the first release
-  const cols = (d.prepare("PRAGMA table_info(errands)").all() as { name: string }[]).map((c) => c.name);
-  if (!cols.includes("found")) d.exec("ALTER TABLE errands ADD COLUMN found TEXT NOT NULL DEFAULT '[]'");
-  const wcols = (d.prepare("PRAGMA table_info(wallets)").all() as { name: string }[]).map((c) => c.name);
-  if (!wcols.includes("ship_to")) d.exec("ALTER TABLE wallets ADD COLUMN ship_to TEXT");
-  return d;
+      status TEXT NOT NULL, created_at TEXT NOT NULL)`),
+    q.query(`CREATE INDEX IF NOT EXISTS errands_user ON errands (user_id, created_at DESC)`),
+    q.query(`CREATE INDEX IF NOT EXISTS tape_errand ON tape (errand_id, id)`),
+    q.query(`CREATE INDEX IF NOT EXISTS purchases_mandate ON purchases (mandate_id, status, created_at)`),
+  ]));
+}
+
+async function db() {
+  await schema();
+  return sql();
 }
 
 const now = () => new Date().toISOString();
 export const newId = (p: string) => `${p}_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+const json = (v: unknown) => (v === undefined || v === null ? null : JSON.stringify(v));
 
 /* ---------- wallet ---------- */
 
-type WalletRow = {
-  user_id: string;
-  vault_id: string | null;
-  payer_email: string | null;
-  setup_token: string | null;
-  ship_to: string | null;
-};
+type WalletRow = { vault_id: string | null; payer_email: string | null; ship_to: ShipTo | null };
 
-export function getWallet(userId: string): Wallet | null {
-  const r = db.prepare("SELECT * FROM wallets WHERE user_id = ?").get(userId) as WalletRow | undefined;
+export async function getWallet(userId: string): Promise<Wallet | null> {
+  const q = await db();
+  const [r] = (await q`SELECT vault_id, payer_email, ship_to FROM wallets WHERE user_id = ${userId}`) as WalletRow[];
   if (!r?.vault_id) return null;
-  return { vaultId: r.vault_id, payerEmail: r.payer_email ?? "", shipTo: r.ship_to ? JSON.parse(r.ship_to) : undefined };
+  return { vaultId: r.vault_id, payerEmail: r.payer_email ?? "", shipTo: r.ship_to ?? undefined };
 }
 
-export function saveShipTo(userId: string, shipTo: ShipTo) {
-  db.prepare("UPDATE wallets SET ship_to = ? WHERE user_id = ?").run(JSON.stringify(shipTo), userId);
+export async function saveShipTo(userId: string, shipTo: ShipTo) {
+  const q = await db();
+  await q`UPDATE wallets SET ship_to = ${json(shipTo)}::jsonb WHERE user_id = ${userId}`;
 }
 
-export function saveSetupToken(userId: string, setupToken: string) {
-  db.prepare(
-    `INSERT INTO wallets (user_id, setup_token, created_at) VALUES (?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET setup_token = excluded.setup_token`,
-  ).run(userId, setupToken, now());
+export async function saveSetupToken(userId: string, setupToken: string) {
+  const q = await db();
+  await q`INSERT INTO wallets (user_id, setup_token, created_at) VALUES (${userId}, ${setupToken}, ${now()})
+          ON CONFLICT (user_id) DO UPDATE SET setup_token = EXCLUDED.setup_token`;
 }
 
-export function getSetupToken(userId: string) {
-  const r = db.prepare("SELECT setup_token FROM wallets WHERE user_id = ?").get(userId) as { setup_token: string | null } | undefined;
+export async function getSetupToken(userId: string) {
+  const q = await db();
+  const [r] = (await q`SELECT setup_token FROM wallets WHERE user_id = ${userId}`) as { setup_token: string | null }[];
   return r?.setup_token ?? null;
 }
 
-export function saveVault(userId: string, vaultId: string, customerId: string, payerEmail: string) {
-  db.prepare("UPDATE wallets SET vault_id = ?, customer_id = ?, payer_email = ? WHERE user_id = ?").run(
-    vaultId,
-    customerId,
-    payerEmail,
-    userId,
-  );
+export async function saveVault(userId: string, vaultId: string, customerId: string, payerEmail: string) {
+  const q = await db();
+  await q`UPDATE wallets SET vault_id = ${vaultId}, customer_id = ${customerId}, payer_email = ${payerEmail} WHERE user_id = ${userId}`;
 }
 
 /* ---------- mandate ---------- */
@@ -97,8 +88,8 @@ export function saveVault(userId: string, vaultId: string, customerId: string, p
 type MandateRow = {
   id: string;
   purpose: string;
-  covers: string;
-  excludes: string;
+  covers: string[];
+  excludes: string[];
   monthly_budget: number;
   ask_above: number;
   expires: string;
@@ -109,37 +100,39 @@ const monthStart = () => {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
 };
 
-export function spentThisMonth(mandateId: string) {
-  const r = db
-    .prepare("SELECT COALESCE(SUM(amount), 0) AS s FROM purchases WHERE mandate_id = ? AND status = 'settled' AND created_at >= ?")
-    .get(mandateId, monthStart()) as { s: number };
-  return Math.round(r.s * 100) / 100;
+export async function spentThisMonth(mandateId: string) {
+  const q = await db();
+  const [r] = (await q`SELECT COALESCE(SUM(amount), 0) AS s FROM purchases
+                       WHERE mandate_id = ${mandateId} AND status = 'settled' AND created_at >= ${monthStart()}`) as { s: number }[];
+  return Math.round(Number(r.s) * 100) / 100;
 }
 
-export function getMandate(userId: string): Mandate | null {
-  const r = db
-    .prepare("SELECT * FROM mandates WHERE user_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1")
-    .get(userId) as MandateRow | undefined;
+export async function getMandate(userId: string): Promise<Mandate | null> {
+  const q = await db();
+  const [r] = (await q`SELECT * FROM mandates WHERE user_id = ${userId} AND status = 'active'
+                       ORDER BY created_at DESC LIMIT 1`) as MandateRow[];
   if (!r) return null;
   return {
     id: r.id,
     purpose: r.purpose,
-    covers: JSON.parse(r.covers),
-    excludes: JSON.parse(r.excludes),
+    covers: r.covers,
+    excludes: r.excludes,
     monthlyBudget: r.monthly_budget,
     askAbove: r.ask_above,
     expires: r.expires,
-    spent: spentThisMonth(r.id),
+    spent: await spentThisMonth(r.id),
   };
 }
 
-export function signMandate(userId: string, m: Omit<Mandate, "id" | "spent">) {
-  db.prepare("UPDATE mandates SET status = 'replaced' WHERE user_id = ? AND status = 'active'").run(userId);
+export async function signMandate(userId: string, m: Omit<Mandate, "id" | "spent">) {
+  const q = await db();
   const id = newId("m");
-  db.prepare(
-    `INSERT INTO mandates (id, user_id, purpose, covers, excludes, monthly_budget, ask_above, expires, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
-  ).run(id, userId, m.purpose, JSON.stringify(m.covers), JSON.stringify(m.excludes), m.monthlyBudget, m.askAbove, m.expires, now());
+  await q.transaction([
+    q`UPDATE mandates SET status = 'replaced' WHERE user_id = ${userId} AND status = 'active'`,
+    q`INSERT INTO mandates (id, user_id, purpose, covers, excludes, monthly_budget, ask_above, expires, status, created_at)
+      VALUES (${id}, ${userId}, ${m.purpose}, ${json(m.covers)}::jsonb, ${json(m.excludes)}::jsonb,
+              ${m.monthlyBudget}, ${m.askAbove}, ${m.expires}, 'active', ${now()})`,
+  ]);
   return id;
 }
 
@@ -149,92 +142,107 @@ type ErrandRow = {
   id: string;
   ask: string;
   status: ErrandStatus;
-  reply: string;
-  options: string;
-  found: string;
-  approval: string | null;
-  receipt: string | null;
+  reply: string[];
+  options: Option[];
+  found: FoundCard[] | null;
+  approval: Errand["approval"] | null;
+  receipt: Errand["receipt"] | null;
   model: string | null;
   created_at: string;
   mandate_id: string;
-  user_id: string;
 };
 
-function hydrate(r: ErrandRow): Errand {
-  const tape = db
-    .prepare("SELECT at, kind, detail, amount, ref FROM tape WHERE errand_id = ? ORDER BY id")
-    .all(r.id) as TapeLine[];
-  const purchase = db.prepare("SELECT id, status FROM purchases WHERE errand_id = ? ORDER BY created_at DESC LIMIT 1").get(r.id) as
-    | { id: string; status: string }
-    | undefined;
-  return {
+type TapeRow = { errand_id: string; at: string; kind: TapeLine["kind"]; detail: string; amount: number | null; ref: string | null };
+
+/** Hydrate errands with their tape and latest purchase in two queries total, not two per errand. */
+async function hydrate(rows: ErrandRow[]): Promise<Errand[]> {
+  if (!rows.length) return [];
+  const q = await db();
+  const ids = rows.map((r) => r.id);
+  const [tape, purchases] = (await q.transaction([
+    q`SELECT errand_id, at, kind, detail, amount, ref FROM tape WHERE errand_id = ANY(${ids}) ORDER BY id`,
+    q`SELECT DISTINCT ON (errand_id) errand_id, id FROM purchases WHERE errand_id = ANY(${ids})
+      ORDER BY errand_id, created_at DESC`,
+  ])) as [TapeRow[], { errand_id: string; id: string }[]];
+  return rows.map((r) => ({
     id: r.id,
     ask: r.ask,
     createdAt: r.created_at,
     status: r.status,
-    reply: JSON.parse(r.reply),
-    options: JSON.parse(r.options),
-    found: JSON.parse(r.found ?? "[]"),
-    approval: r.approval ? JSON.parse(r.approval) : undefined,
-    receipt: r.receipt ? JSON.parse(r.receipt) : undefined,
+    reply: r.reply ?? [],
+    options: r.options ?? [],
+    found: r.found ?? [],
+    approval: r.approval ?? undefined,
+    receipt: r.receipt ?? undefined,
     model: r.model ?? undefined,
-    purchaseId: purchase?.id,
-    tape: tape.map((l) => ({ ...l, amount: l.amount ?? undefined, ref: l.ref ?? undefined })),
-  };
+    purchaseId: purchases.find((p) => p.errand_id === r.id)?.id,
+    tape: tape
+      .filter((l) => l.errand_id === r.id)
+      .map((l) => ({ at: l.at, kind: l.kind, detail: l.detail, amount: l.amount ?? undefined, ref: l.ref ?? undefined })),
+  }));
 }
 
-export function listErrands(userId: string): Errand[] {
-  const rows = db.prepare("SELECT * FROM errands WHERE user_id = ? ORDER BY created_at DESC LIMIT 30").all(userId) as ErrandRow[];
-  return rows.map(hydrate);
+export async function listErrands(userId: string): Promise<Errand[]> {
+  const q = await db();
+  const rows = (await q`SELECT * FROM errands WHERE user_id = ${userId} ORDER BY created_at DESC LIMIT 30`) as ErrandRow[];
+  return hydrate(rows);
 }
 
-export function getErrand(userId: string, id: string) {
-  const r = db.prepare("SELECT * FROM errands WHERE id = ? AND user_id = ?").get(id, userId) as ErrandRow | undefined;
-  return r ? { errand: hydrate(r), mandateId: r.mandate_id } : null;
+export async function getErrand(userId: string, id: string) {
+  const q = await db();
+  const [r] = (await q`SELECT * FROM errands WHERE id = ${id} AND user_id = ${userId}`) as ErrandRow[];
+  if (!r) return null;
+  const [errand] = await hydrate([r]);
+  return { errand, mandateId: r.mandate_id };
 }
 
-export function createErrand(userId: string, mandateId: string, ask: string) {
+export async function createErrand(userId: string, mandateId: string, ask: string) {
+  const q = await db();
   const id = newId("e");
-  db.prepare("INSERT INTO errands (id, user_id, mandate_id, ask, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)").run(
-    id,
-    userId,
-    mandateId,
-    ask,
-    now(),
-  );
+  await q`INSERT INTO errands (id, user_id, mandate_id, ask, status, created_at)
+          VALUES (${id}, ${userId}, ${mandateId}, ${ask}, 'running', ${now()})`;
   return id;
 }
 
-export function updateErrand(
+const ERRAND_COLUMNS = new Set(["status", "reply", "options", "found", "approval", "receipt", "model"]);
+const TEXT_COLUMNS = new Set(["status", "model"]);
+
+export async function updateErrand(
   id: string,
-  patch: Partial<{ status: ErrandStatus; reply: string[]; options: Option[]; found: FoundCard[]; approval: Errand["approval"] | null; receipt: Errand["receipt"]; model: string }>,
+  patch: Partial<{
+    status: ErrandStatus;
+    reply: string[];
+    options: Option[];
+    found: FoundCard[];
+    approval: Errand["approval"] | null;
+    receipt: Errand["receipt"];
+    model: string;
+  }>,
 ) {
-  const cols: string[] = [];
+  const sets: string[] = [];
   const vals: (string | null)[] = [];
   for (const [k, v] of Object.entries(patch)) {
-    if (v === undefined) continue;
-    cols.push(`${k} = ?`);
-    vals.push(typeof v === "string" ? v : v === null ? null : JSON.stringify(v));
+    if (v === undefined || !ERRAND_COLUMNS.has(k)) continue; // column names come from this allow-list only
+    vals.push(TEXT_COLUMNS.has(k) ? (v as string) : json(v));
+    sets.push(`${k} = $${vals.length}${TEXT_COLUMNS.has(k) ? "" : "::jsonb"}`);
   }
-  if (cols.length) db.prepare(`UPDATE errands SET ${cols.join(", ")} WHERE id = ?`).run(...vals, id);
+  if (!sets.length) return;
+  vals.push(id);
+  const q = await db();
+  await q.query(`UPDATE errands SET ${sets.join(", ")} WHERE id = $${vals.length}`, vals);
 }
 
-export function addTape(errandId: string, line: Omit<TapeLine, "at">): TapeLine {
+export async function addTape(errandId: string, line: Omit<TapeLine, "at">): Promise<TapeLine> {
   const full = { at: now(), ...line };
-  db.prepare("INSERT INTO tape (errand_id, at, kind, detail, amount, ref) VALUES (?, ?, ?, ?, ?, ?)").run(
-    errandId,
-    full.at,
-    full.kind,
-    full.detail,
-    full.amount ?? null,
-    full.ref ?? null,
-  );
+  const q = await db();
+  await q`INSERT INTO tape (errand_id, at, kind, detail, amount, ref)
+          VALUES (${errandId}, ${full.at}, ${full.kind}, ${full.detail}, ${full.amount ?? null}, ${full.ref ?? null})`;
   return full;
 }
 
 /* ---------- purchases ---------- */
 
-export function recordPurchase(p: {
+export async function recordPurchase(p: {
   errandId: string;
   mandateId: string;
   userId: string;
@@ -246,20 +254,29 @@ export function recordPurchase(p: {
   captureId: string;
   payoutBatch?: string;
 }) {
+  const q = await db();
   const id = newId("p");
-  db.prepare(
-    `INSERT INTO purchases (id, errand_id, mandate_id, user_id, product_id, title, retailer, amount, order_id, capture_id, payout_batch, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'settled', ?)`,
-  ).run(id, p.errandId, p.mandateId, p.userId, p.productId, p.title, p.retailer, p.amount, p.orderId, p.captureId, p.payoutBatch ?? null, now());
+  await q`INSERT INTO purchases (id, errand_id, mandate_id, user_id, product_id, title, retailer, amount,
+                                 order_id, capture_id, payout_batch, status, created_at)
+          VALUES (${id}, ${p.errandId}, ${p.mandateId}, ${p.userId}, ${p.productId}, ${p.title}, ${p.retailer}, ${p.amount},
+                  ${p.orderId}, ${p.captureId}, ${p.payoutBatch ?? null}, 'settled', ${now()})`;
   return id;
 }
 
-export function getPurchase(userId: string, id: string) {
-  return db.prepare("SELECT * FROM purchases WHERE id = ? AND user_id = ?").get(id, userId) as
-    | { id: string; errand_id: string; capture_id: string; amount: number; title: string; status: string }
-    | undefined;
+export async function getPurchase(userId: string, id: string) {
+  const q = await db();
+  const [r] = (await q`SELECT * FROM purchases WHERE id = ${id} AND user_id = ${userId}`) as {
+    id: string;
+    errand_id: string;
+    capture_id: string;
+    amount: number;
+    title: string;
+    status: string;
+  }[];
+  return r;
 }
 
-export function markRefunded(id: string, refundId: string) {
-  db.prepare("UPDATE purchases SET status = 'refunded', refund_id = ? WHERE id = ?").run(refundId, id);
+export async function markRefunded(id: string, refundId: string) {
+  const q = await db();
+  await q`UPDATE purchases SET status = 'refunded', refund_id = ${refundId} WHERE id = ${id}`;
 }

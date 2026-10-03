@@ -11,6 +11,7 @@
   "dependencies": {
     "@ai-sdk/google": "^4.0.87",
     "@ai-sdk/groq": "^4.0.54",
+    "@neondatabase/serverless": "^1.2.0",
     "@paypal/agent-toolkit": "^1.11.0",
     "ai": "^7.0.127",
     "next": "16.3.8",
@@ -29,7 +30,7 @@
     "typescript": "^5"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=20"
   },
   "description": "Spending mandates for AI shopping agents, paid through PayPal",
   "license": "MIT"

@@ -10,26 +10,28 @@ export const maxDuration = 120;
 export async function POST(req: Request) {
   const uid = await userId();
   const { ask } = (await req.json()) as { ask?: string };
-  const wallet = getWallet(uid);
-  const mandate = getMandate(uid);
+  const [wallet, mandate] = await Promise.all([getWallet(uid), getMandate(uid)]);
   if (!wallet || !mandate) return NextResponse.json({ error: "Connect PayPal and sign a mandate first." }, { status: 400 });
   if (!ask || ask.trim().length < 3) return NextResponse.json({ error: "What should Leash get?" }, { status: 400 });
 
-  const errandId = createErrand(uid, mandate.id, ask.trim().slice(0, 400));
+  const errandId = await createErrand(uid, mandate.id, ask.trim().slice(0, 400));
   const enc = new TextEncoder();
 
   const stream = new ReadableStream({
     async start(controller) {
       const emit = (e: ErrandEvent) => controller.enqueue(enc.encode(JSON.stringify(e) + "\n"));
-      emit({ type: "start", errand: getErrand(uid, errandId)!.errand });
+      emit({ type: "start", errand: (await getErrand(uid, errandId))!.errand });
       try {
         const errand = await runErrand({ userId: uid, errandId, ask: ask.trim(), wallet, emit });
-        emit({ type: "done", errand, mandate: getMandate(uid)! });
+        emit({ type: "done", errand, mandate: (await getMandate(uid))! });
       } catch (e) {
         console.error(e);
-        emit({ type: "tape", line: addTape(errandId, { kind: "error", detail: "agent stopped — nothing was charged after this line" }) });
-        updateErrand(errandId, { status: "failed", reply: ["I hit a problem talking to my model provider and stopped. Try again in a minute."] });
-        emit({ type: "done", errand: getErrand(uid, errandId)!.errand, mandate: getMandate(uid)! });
+        emit({ type: "tape", line: await addTape(errandId, { kind: "error", detail: "agent stopped — nothing was charged after this line" }) });
+        await updateErrand(errandId, {
+          status: "failed",
+          reply: ["I hit a problem talking to my model provider and stopped. Try again in a minute."],
+        });
+        emit({ type: "done", errand: (await getErrand(uid, errandId))!.errand, mandate: (await getMandate(uid))! });
       } finally {
         controller.close();
       }

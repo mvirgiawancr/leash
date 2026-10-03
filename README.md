@@ -68,7 +68,7 @@ Leash acts as the merchant of record: it charges the buyer's vaulted wallet, the
 
 ## Run it locally
 
-Requirements: Node.js **22.5+** (uses the built-in `node:sqlite`), a PayPal developer account, and free API keys for Channel3, Groq and Google AI Studio.
+Requirements: Node.js 20+, a Postgres database (a free [Neon](https://neon.tech) project works; the schema is created on first request), a PayPal developer account, and free API keys for Channel3, Groq and Google AI Studio.
 
 1. In the [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/applications/sandbox) → **Sandbox** → create a **Merchant** REST app.
    Under *Features* enable **Save payment methods** and **Transaction search**.
@@ -85,6 +85,7 @@ Open http://localhost:3000, click **Connect PayPal wallet**, log in with the san
 
 | Variable | What |
 |---|---|
+| `DATABASE_URL` | Postgres connection string (Neon) |
 | `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` | Sandbox REST app credentials |
 | `RETAILER_PAYOUT_EMAIL` | Sandbox business account that receives retailer payouts |
 | `CHANNEL3_API_KEY` | Product search |
@@ -94,7 +95,7 @@ Open http://localhost:3000, click **Connect PayPal wallet**, log in with the san
 
 ## Trying the hosted demo
 
-The hosted demo runs on Render's free tier. The first request after a quiet period can take about a minute while the server wakes up, and the demo database resets when it sleeps, so each visit starts fresh: connect PayPal, sign a mandate, send errands. Sandbox buyer credentials are in the Devpost submission's testing instructions.
+The hosted demo runs on Vercel with a Neon Postgres database. Each browser gets its own anonymous session: connect PayPal (sandbox buyer credentials are in the Devpost submission's testing instructions), sign a mandate, send errands.
 
 Good errands to try:
 - *"I need a webcam for client calls that doesn't make me look like a potato."* (buys on its own)
@@ -103,7 +104,7 @@ Good errands to try:
 
 ## Stack
 
-Next.js 16 (App Router, route handlers, `proxy.ts`), React 19, TypeScript, Vercel AI SDK 7, `@ai-sdk/groq`, `@ai-sdk/google`, `@paypal/agent-toolkit`, zod, SQLite (`node:sqlite`), Channel3. No UI kit: hand-written CSS (cheque stock, ledger rules, receipt tape, rubber stamps).
+Next.js 16 (App Router, route handlers, `proxy.ts`), React 19, TypeScript, Vercel AI SDK 7, `@ai-sdk/groq`, `@ai-sdk/google`, `@paypal/agent-toolkit`, zod, Neon serverless Postgres, Channel3. Hosted on Vercel. No UI kit: hand-written CSS (cheque stock, ledger rules, receipt tape, rubber stamps).
 
 ## Limitations
 

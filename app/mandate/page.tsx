@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 export default async function MandatePage() {
   const uid = await userId();
-  const wallet = getWallet(uid);
+  const [wallet, mandate] = await Promise.all([getWallet(uid), getMandate(uid)]);
   if (!wallet) redirect("/");
   return (
     <>
@@ -21,7 +21,7 @@ export default async function MandatePage() {
         </span>
       </header>
       <main className="compose">
-        <MandateComposer payer={wallet.payerEmail} hasMandate={!!getMandate(uid)} />
+        <MandateComposer payer={wallet.payerEmail} hasMandate={!!mandate} />
       </main>
     </>
   );

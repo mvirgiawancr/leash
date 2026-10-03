@@ -7,15 +7,13 @@ import { userId } from "@/lib/session";
 export async function POST(_req: Request, ctx: RouteContext<"/api/errands/[id]/approve">) {
   const { id } = await ctx.params;
   const uid = await userId();
-  const found = getErrand(uid, id);
-  const wallet = getWallet(uid);
-  const mandate = getMandate(uid);
+  const [found, wallet, mandate] = await Promise.all([getErrand(uid, id), getWallet(uid), getMandate(uid)]);
   if (!found || !wallet || !mandate) return NextResponse.json({ error: "Not found" }, { status: 404 });
   const { errand } = found;
   if (errand.status !== "needs_you" || !errand.approval) return NextResponse.json({ error: "Nothing to approve." }, { status: 409 });
 
   const a = errand.approval;
-  addTape(id, { kind: "approve", detail: "signed by you", amount: -a.amount });
+  await addTape(id, { kind: "approve", detail: "signed by you", amount: -a.amount });
   try {
     const r = await executePurchase({
       userId: uid,
@@ -25,14 +23,15 @@ export async function POST(_req: Request, ctx: RouteContext<"/api/errands/[id]/a
       item: { productId: a.productId, title: a.title, retailer: a.retailer, price: a.amount },
     });
     if (!r.ok) {
-      updateErrand(id, { status: "declined", approval: null, reply: [...errand.reply, `You signed, but it no longer fits: ${r.why}`] });
+      await updateErrand(id, { status: "declined", approval: null, reply: [...errand.reply, `You signed, but it no longer fits: ${r.why}`] });
     } else {
-      updateErrand(id, { reply: [...errand.reply, `You signed for it, so I bought it: ${a.title} from ${a.retailer}.`] });
+      await updateErrand(id, { reply: [...errand.reply, `You signed for it, so I bought it: ${a.title} from ${a.retailer}.`] });
     }
   } catch (e) {
     console.error(e);
-    addTape(id, { kind: "error", detail: "PayPal charge failed" });
-    return NextResponse.json({ error: "PayPal didn’t accept the charge.", errand: getErrand(uid, id)!.errand }, { status: 502 });
+    await addTape(id, { kind: "error", detail: "PayPal charge failed" });
+    return NextResponse.json({ error: "PayPal didn’t accept the charge.", errand: (await getErrand(uid, id))!.errand }, { status: 502 });
   }
-  return NextResponse.json({ errand: getErrand(uid, id)!.errand, mandate: getMandate(uid) });
+  const [after, m] = await Promise.all([getErrand(uid, id), getMandate(uid)]);
+  return NextResponse.json({ errand: after!.errand, mandate: m });
 }

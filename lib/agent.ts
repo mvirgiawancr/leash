@@ -25,30 +25,30 @@ export async function executePurchase(args: {
   emit?: Emit;
 }) {
   const { userId, errandId, mandate, wallet, item, emit } = args;
-  const tape = (l: Omit<TapeLine, "at">) => {
-    const line = addTape(errandId, l); // always persist, even when nobody is streaming (the Approve button)
+  const tape = async (l: Omit<TapeLine, "at">) => {
+    const line = await addTape(errandId, l); // always persist, even when nobody is streaming (the Approve button)
     emit?.({ type: "tape", line });
   };
 
-  const remaining = mandate.monthlyBudget - spentThisMonth(mandate.id);
+  const remaining = mandate.monthlyBudget - (await spentThisMonth(mandate.id));
   if (item.price > remaining + 1e-9) {
-    tape({ kind: "refuse", detail: `over budget, ${money(remaining)} left` });
+    await tape({ kind: "refuse", detail: `over budget, ${money(remaining)} left` });
     return { ok: false as const, why: `Only ${money(remaining)} left this month.` };
   }
 
   const { orderId, captureId } = await chargeVault(wallet.vaultId, item.price, `Leash · ${item.title} (${item.retailer})`, wallet.shipTo);
-  tape({ kind: "charge", detail: "PayPal wallet (vault)", amount: -item.price, ref: `order ${orderId}` });
+  await tape({ kind: "charge", detail: "PayPal wallet (vault)", amount: -item.price, ref: `order ${orderId}` });
 
   let payoutBatch: string | undefined;
   try {
     payoutBatch = await payRetailer(item.price, `Settlement: ${item.title} via ${item.retailer}`);
-    tape({ kind: "payout", detail: item.retailer, amount: item.price, ref: `batch ${payoutBatch}` });
+    await tape({ kind: "payout", detail: item.retailer, amount: item.price, ref: `batch ${payoutBatch}` });
   } catch (e) {
-    tape({ kind: "error", detail: `payout to ${item.retailer} failed — will retry` });
+    await tape({ kind: "error", detail: `payout to ${item.retailer} failed — will retry` });
     console.error(e);
   }
 
-  recordPurchase({
+  await recordPurchase({
     errandId,
     mandateId: mandate.id,
     userId,
@@ -60,7 +60,7 @@ export async function executePurchase(args: {
     captureId,
     payoutBatch,
   });
-  updateErrand(errandId, { status: "bought", receipt: { order: orderId, capture: captureId, payout: payoutBatch }, approval: null });
+  await updateErrand(errandId, { status: "bought", receipt: { order: orderId, capture: captureId, payout: payoutBatch }, approval: null });
   emit?.({ type: "status", status: "bought" });
   return { ok: true as const, orderId, captureId, payoutBatch };
 }
@@ -95,10 +95,10 @@ Plain text, 1–3 short paragraphs, no markdown, no lists, no tables (the app sh
 
 export async function runErrand(args: { userId: string; errandId: string; ask: string; wallet: Wallet; emit: Emit }) {
   const { userId, errandId, ask, wallet, emit } = args;
-  const mandate = getMandate(userId);
+  const mandate = await getMandate(userId);
   if (!mandate) throw new Error("No active mandate");
 
-  const tape = (l: Omit<TapeLine, "at">) => emit({ type: "tape", line: addTape(errandId, l) });
+  const tape = async (l: Omit<TapeLine, "at">) => emit({ type: "tape", line: await addTape(errandId, l) });
   const found = new Map<string, Found>();
   const cleared = new Set<string>();
   const suspicious = new Set<string>();
@@ -113,7 +113,7 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
       description: "Decline a request that is outside the mandate. Call this instead of searching.",
       inputSchema: z.object({ reason: z.string().describe("short reason, e.g. 'furniture is not a computer peripheral'") }),
       execute: async ({ reason }) => {
-        tape({ kind: "refuse", detail: `outside mandate: ${reason}` });
+        await tape({ kind: "refuse", detail: `outside mandate: ${reason}` });
         run.outcome = "refused";
         return { declined: true };
       },
@@ -130,7 +130,7 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
         if (queries.has(key)) return { error: "You already ran this search. Decide with those results." };
         if (++searches > 2) return { error: "Search limit reached. Decide with what you have." };
         queries.add(key);
-        const remaining = mandate.monthlyBudget - spentThisMonth(mandate.id);
+        const remaining = mandate.monthlyBudget - (await spentThisMonth(mandate.id));
         const items = await searchProducts(query, max_price_usd);
         items.forEach((i) => found.set(i.productId, i));
         // Too-good-to-be-true prices (listing errors, accessories posing as the product) never auto-buy.
@@ -151,9 +151,9 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
             ...(suspicious.has(i.productId) ? { oddPrice: true } : {}),
           });
         }
-        updateErrand(errandId, { found: sheet });
+        await updateErrand(errandId, { found: sheet });
         emit({ type: "found", found: [...sheet] });
-        tape({
+        await tape({
           kind: "search",
           detail: `${query}${max_price_usd ? ` ≤ ${money(max_price_usd)}` : ""} · ${items.length} found${flagged ? ` · ${flagged} odd price` : ""}`,
         });
@@ -190,7 +190,7 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
         options.filter((o) => !o.price_plausible).forEach((o) => suspicious.add(o.product_id));
         shortlisted = true;
         // freeze the contact-sheet notes against the budget as it stood when the agent decided
-        const left = mandate.monthlyBudget - spentThisMonth(mandate.id);
+        const left = mandate.monthlyBudget - (await spentThisMonth(mandate.id));
         for (const c of sheet) {
           c.note =
             c.condition ??
@@ -202,7 +202,7 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
                   ? `over $${Math.round(mandate.askAbove)}`
                   : undefined);
         }
-        updateErrand(errandId, { found: sheet });
+        await updateErrand(errandId, { found: sheet });
         emit({ type: "found", found: sheet.map((c) => ({ ...c })) });
         const list: Option[] = options
           .map(({ product_id, why }) => {
@@ -213,10 +213,10 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
           })
           .filter((o): o is NonNullable<typeof o> => o !== null);
         if (!list.length) return { error: "Unknown product ids. Use product_id values from search results." };
-        updateErrand(errandId, { options: list });
+        await updateErrand(errandId, { options: list });
         emit({ type: "options", options: list });
         const p = found.get(pick);
-        if (p) tape({ kind: "pick", detail: `${p.title} · ${p.retailer}` });
+        if (p) await tape({ kind: "pick", detail: `${p.title} · ${p.retailer}` });
         return { recorded: list.length };
       },
     }),
@@ -228,9 +228,9 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
         const p = found.get(product_id);
         if (!p) return { error: "Unknown product_id." };
         if (!shortlisted) return { error: "Call shortlist first so the user can see what you compared." };
-        const remaining = mandate.monthlyBudget - spentThisMonth(mandate.id);
+        const remaining = mandate.monthlyBudget - (await spentThisMonth(mandate.id));
         if (p.price > remaining) {
-          tape({ kind: "refuse", detail: `${money(p.price)} is over the ${money(remaining)} left` });
+          await tape({ kind: "refuse", detail: `${money(p.price)} is over the ${money(remaining)} left` });
           return { ok: false, reason: "over_budget", remaining };
         }
         // Why a human has to sign, most important first. Used / refurbished never auto-buys.
@@ -243,7 +243,7 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
                 ? "odd_price"
                 : null;
         if (reason) {
-          updateErrand(errandId, {
+          await updateErrand(errandId, {
             status: "needs_you",
             approval: { productId: p.productId, title: p.title, retailer: p.retailer, amount: p.price, image: p.image, reason },
           });
@@ -252,13 +252,13 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
             not_new: `${p.condition} listing`,
             odd_price: "price looks too low to trust",
           }[reason];
-          tape({ kind: "hold", detail: `${why}, waiting for you`, amount: -p.price });
-          emit({ type: "status", status: "needs_you", approval: getErrand(userId, errandId)?.errand.approval });
+          await tape({ kind: "hold", detail: `${why}, waiting for you`, amount: -p.price });
+          emit({ type: "status", status: "needs_you", approval: (await getErrand(userId, errandId))?.errand.approval });
           run.outcome = "needs_you";
           return { ok: false, reason: "held_for_signature", note: "Held for the user's signature. Do not call purchase. Write your final message." };
         }
         cleared.add(product_id);
-        tape({ kind: "check", detail: `within mandate, ${money(remaining - p.price)} left after` });
+        await tape({ kind: "check", detail: `within mandate, ${money(remaining - p.price)} left after` });
         return { ok: true, remaining_after: +(remaining - p.price).toFixed(2) };
       },
     }),
@@ -276,7 +276,7 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
           if (r.ok) run.outcome = "bought";
           return r;
         } catch (e) {
-          tape({ kind: "error", detail: "PayPal charge failed" });
+          await tape({ kind: "error", detail: "PayPal charge failed" });
           return { error: String((e as Error).message) };
         }
       },
@@ -318,17 +318,17 @@ export async function runErrand(args: { userId: string; errandId: string; ask: s
   }
 
   const status: ErrandStatus = run.outcome ?? (searches === 0 ? "refused" : "no_buy");
-  if (status === "refused" && !getErrand(userId, errandId)?.errand.tape.length) {
-    tape({ kind: "refuse", detail: "outside mandate" });
+  if (status === "refused" && !(await getErrand(userId, errandId))?.errand.tape.length) {
+    await tape({ kind: "refuse", detail: "outside mandate" });
   }
   const reply = clean(finalText);
-  updateErrand(errandId, { status, reply: reply.length ? reply : ledgerSummary(userId, errandId), model: modelName || undefined });
-  return getErrand(userId, errandId)!.errand;
+  await updateErrand(errandId, { status, reply: reply.length ? reply : await ledgerSummary(userId, errandId), model: modelName || undefined });
+  return (await getErrand(userId, errandId))!.errand;
 }
 
 /** Plain, factual summary straight from the ledger, used when the model can't write one. */
-function ledgerSummary(userId: string, errandId: string): string[] {
-  const e = getErrand(userId, errandId)?.errand;
+async function ledgerSummary(userId: string, errandId: string): Promise<string[]> {
+  const e = (await getErrand(userId, errandId))?.errand;
   const pick = e?.options.find((o) => o.picked);
   if (!e || !pick) return ["Done. See the ledger tape for every step."];
   if (e.status === "bought") return [`I bought ${pick.title} from ${pick.retailer} for ${money(pick.price)} with your PayPal wallet.`];

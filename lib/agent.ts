@@ -4,7 +4,7 @@ import { z } from "zod";
 import { searchProducts, type Found } from "./channel3";
 import { addTape, getErrand, getMandate, recordPurchase, spentThisMonth, updateErrand } from "./db";
 import { withFallback } from "./llm";
-import { chargeVault, payRetailer } from "./paypal";
+import { chargeVault, payRetailer, PayPalError } from "./paypal";
 import type { ErrandEvent, ErrandStatus, FoundCard, Mandate, Option, TapeLine, Wallet } from "./types";
 
 type Emit = (e: ErrandEvent) => void;
@@ -41,18 +41,26 @@ export async function executePurchase(args: {
 
   // The buyer is already charged at this point; settle with the retailer, one retry on a transient failure.
   let payoutBatch: string | undefined;
+  let why = "";
   for (let attempt = 1; attempt <= 2 && !payoutBatch; attempt++) {
     try {
       payoutBatch = await payRetailer(item.price, `Settlement: ${item.title} via ${item.retailer}`);
     } catch (e) {
       console.error(`[payout] attempt ${attempt} to ${item.retailer} failed:`, e);
+      // a short, secret-free reason for the ledger: PayPal's issue code, or "config" for a missing env var
+      why =
+        e instanceof PayPalError
+          ? (e.body.details?.[0]?.issue ?? e.body.name ?? `HTTP ${e.status}`)
+          : /Missing env/.test(String((e as Error)?.message))
+            ? "server config"
+            : "network";
       if (attempt === 1) await new Promise((r) => setTimeout(r, 1200));
     }
   }
   if (payoutBatch) {
     await tape({ kind: "payout", detail: item.retailer, amount: item.price, ref: `batch ${payoutBatch}` });
   } else {
-    await tape({ kind: "error", detail: `payout to ${item.retailer} didn't go through; funds held by Leash` });
+    await tape({ kind: "error", detail: `payout to ${item.retailer} didn't go through (${why}); funds held by Leash` });
   }
 
   await recordPurchase({

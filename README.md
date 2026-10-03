@@ -6,6 +6,8 @@ Leash is an AI shopping agent that spends your money only inside a *mandate* you
 
 Built for the [PayPal AI Hackathon 2026](https://paypalaihackathon.devpost.com/). Runs entirely on the **PayPal sandbox**; no real money moves.
 
+**Live demo: [leash.virlabs.my.id](https://leash.virlabs.my.id)**
+
 ![Leash landing page](docs/landing.png)
 
 ## The problem

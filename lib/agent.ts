@@ -39,13 +39,20 @@ export async function executePurchase(args: {
   const { orderId, captureId } = await chargeVault(wallet.vaultId, item.price, `Leash · ${item.title} (${item.retailer})`, wallet.shipTo);
   await tape({ kind: "charge", detail: "PayPal wallet (vault)", amount: -item.price, ref: `order ${orderId}` });
 
+  // The buyer is already charged at this point; settle with the retailer, one retry on a transient failure.
   let payoutBatch: string | undefined;
-  try {
-    payoutBatch = await payRetailer(item.price, `Settlement: ${item.title} via ${item.retailer}`);
+  for (let attempt = 1; attempt <= 2 && !payoutBatch; attempt++) {
+    try {
+      payoutBatch = await payRetailer(item.price, `Settlement: ${item.title} via ${item.retailer}`);
+    } catch (e) {
+      console.error(`[payout] attempt ${attempt} to ${item.retailer} failed:`, e);
+      if (attempt === 1) await new Promise((r) => setTimeout(r, 1200));
+    }
+  }
+  if (payoutBatch) {
     await tape({ kind: "payout", detail: item.retailer, amount: item.price, ref: `batch ${payoutBatch}` });
-  } catch (e) {
-    await tape({ kind: "error", detail: `payout to ${item.retailer} failed — will retry` });
-    console.error(e);
+  } else {
+    await tape({ kind: "error", detail: `payout to ${item.retailer} didn't go through; funds held by Leash` });
   }
 
   await recordPurchase({

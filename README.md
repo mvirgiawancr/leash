@@ -68,6 +68,10 @@ Leash acts as the merchant of record: it charges the buyer's vaulted wallet, the
 - **Mandate drafting:** structured output (`Output.object` + zod) turns plain English into a mandate the user edits before signing.
 - **Product search:** Channel3 API (real, in-stock listings with images).
 
+## Sponsor tool: Channel3
+
+Every product the agent sees comes from the [Channel3](https://trychannel3.com) search API (`POST /v1/search`, see [`lib/channel3.ts`](lib/channel3.ts)). Leash uses its price, retailer, images and listing `condition`: the images fill the contact sheet and the parcel tag, the retailer is who gets paid through PayPal Payouts, and the condition powers the guard that holds used or refurbished listings for your signature instead of buying them.
+
 ## Run it locally
 
 Requirements: Node.js 20+, a Postgres database (a free [Neon](https://neon.tech) project works; the schema is created on first request), a PayPal developer account, and free API keys for Channel3, Groq and Google AI Studio.
